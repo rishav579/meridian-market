@@ -1,6 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────────
 // Multi-Vendor AI-Enhanced Marketplace — Prisma Schema
-// ─────────────────────────────────────────────────────────────────────────────
 // Design notes:
 //  • All money is stored as INTEGER cents (no floating point money, ever).
 //  • Roles/order-statuses are constrained Strings + a Zod type-layer because
@@ -10,7 +8,6 @@
 //  • Every foreign key used in a hot query path is indexed.
 //  • OrderItem snapshots price/product/store names at purchase time so
 //    vendor reports stay correct even if catalog rows change later.
-// ─────────────────────────────────────────────────────────────────────────────
 
 generator client {
   provider = "prisma-client-js"

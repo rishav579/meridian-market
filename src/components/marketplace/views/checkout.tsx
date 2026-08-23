@@ -87,7 +87,7 @@ export function CheckoutView() {
     }
   };
 
-  // ── Success receipt ────────────────────────────────────────────────────────
+  // Success receipt
   if (result) {
     const o = result.order;
     return (
@@ -122,11 +122,11 @@ export function CheckoutView() {
 
         <div className="rounded-xl border bg-muted/30 p-4">
           <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <CreditCard className="size-4 text-primary" aria-hidden /> Payment split (Stripe Connect simulation)
+            <CreditCard className="size-4 text-primary" aria-hidden /> How your payment was split
           </h2>
           <dl className="space-y-2 text-sm">
             <div className="flex justify-between"><dt className="text-muted-foreground">Order total</dt><dd className="font-semibold">{money(o.total)}</dd></div>
-            <div className="flex justify-between"><dt className="text-muted-foreground">Platform commission (10%)</dt><dd>{money(o.commissionTotal)}</dd></div>
+            <div className="flex justify-between"><dt className="text-muted-foreground">Marketplace fee (10%)</dt><dd>{money(o.commissionTotal)}</dd></div>
             {result.payment.transfers.map((t) => (
               <div key={t.transferId} className="flex justify-between">
                 <dt className="text-muted-foreground">→ {t.storeName}</dt>
@@ -136,8 +136,7 @@ export function CheckoutView() {
           </dl>
           <Separator className="my-3" />
           <p className="text-xs text-muted-foreground">
-            Payment intent <span className="font-mono">{result.payment.intentId}</span> ·{" "}
-            {result.payment.webhookDelivered ? "settled via signed webhook (HMAC verified)" : "settled via direct fallback"} · transfer IDs logged in vendor payout ledgers.
+            Payment <span className="font-mono">{result.payment.intentId}</span> confirmed — each vendor has been paid their share.
           </p>
         </div>
 
@@ -252,7 +251,7 @@ export function CheckoutView() {
             {placing ? "Processing payment…" : `Pay ${money(data.subtotalCents)}`}
           </Button>
           <p className="text-center text-xs text-muted-foreground">
-            Simulated Stripe Connect · 10% platform commission · signed webhook settlement
+            Vendors are paid their share of this order directly — no waiting, no middlemen.
           </p>
         </aside>
       </form>

@@ -143,7 +143,7 @@ export function AuthDialog() {
                 {busy ? "Signing in…" : "Sign in"}
               </Button>
               <div className="rounded-lg border bg-muted/40 p-3 space-y-2">
-                <p className="text-xs font-medium text-muted-foreground">Demo accounts — one click to fill:</p>
+                <p className="text-xs font-medium text-muted-foreground">Just exploring? Fill a demo account:</p>
                 <div className="flex flex-wrap gap-2">
                   <Button type="button" variant="outline" size="sm" onClick={() => quickFill("admin@meridian.dev", "Admin123!")}>
                     <User className="mr-1 size-3.5" /> Admin

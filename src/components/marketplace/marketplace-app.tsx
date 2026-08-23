@@ -69,8 +69,8 @@ function Footer() {
             Meridian Market
           </button>
           <p className="text-xs leading-relaxed text-muted-foreground">
-            A multi-vendor marketplace reference build: RBAC auth, split payments,
-            AI shopping assistant, and realtime order operations.
+            Carefully chosen goods from a small circle of independent makers.
+            Vendors keep 90% of every sale.
           </p>
         </div>
         <nav className="space-y-1.5 text-sm" aria-label="Shop">
@@ -82,12 +82,12 @@ function Footer() {
         <nav className="space-y-1.5 text-sm" aria-label="Platform">
           <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Platform</p>
           <button className="block text-muted-foreground hover:text-foreground" onClick={() => useApp.getState().openAuth("signup")}>Become a vendor</button>
-          <span className="block text-muted-foreground">10% flat commission</span>
-          <span className="block text-muted-foreground">Simulated Stripe Connect</span>
+          <span className="block text-muted-foreground">Transparent 10% commission</span>
+          <span className="block text-muted-foreground">Secure split checkout</span>
         </nav>
       </div>
       <div className="border-t py-4 text-center text-xs text-muted-foreground">
-        © {new Date().getFullYear()} Meridian Market — portfolio reference implementation.
+        © {new Date().getFullYear()} Meridian Market. All rights reserved.
       </div>
     </footer>
   );

@@ -1,14 +1,14 @@
 /**
  * withApi — composable route-handler middleware.
  *
- * Pipeline: rate-limit → same-origin/CSRF (mutations) → session → RBAC → handler,
+ * Pipeline: rate-limit → CSRF (mutations) → session → RBAC → handler,
  * with a single typed error envelope (Zod → 422, ApiError → status, else → 500).
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { ZodError, type ZodType } from "zod";
 import { cookies } from "next/headers";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { rateLimit, getClientIp, sweepRateLimiter } from "@/lib/rate-limit";
 import { getSessionUser, type SessionUser } from "@/lib/auth";
 import { CSRF_COOKIE, type Role } from "@/lib/constants";
@@ -55,34 +55,60 @@ export function withApi<C = unknown>(opts: ApiOptions, handler: Handler<C>) {
         sweepRateLimiter();
       }
 
-      // 2. CSRF defense for state-changing verbs: strict same-origin check.
-      //    (Session cookie is SameSite=Lax; origin check blocks cross-site POSTs
-      //    even from Lax-form submissions, and blocks DNS rebinding.)
-      //    Prefers X-Forwarded-Host (set by the gateway, port-preserving); the
-      //    hostname fallback covers proxies that strip the port from Host.
+      // 2. CSRF defense for state-changing verbs, in order of reliability:
+      //    a) double-submit token — the mk_csrf cookie must equal the x-csrf-token
+      //       header. A malicious site cannot read our cookie to forge the header,
+      //       and this check survives any proxy that rewrites Host (preview
+      //       iframes, multi-hop gateways, etc.).
+      //    b) Fetch Metadata — browsers send Sec-Fetch-Site; only `cross-site`
+      //       is rejected (same-origin/same-site/none are fine).
+      //    c) Legacy Origin-vs-Host comparison, used only when neither signal
+      //       exists (non-browser clients without tokens).
+      //    The session cookie itself is SameSite=Lax, which already blocks
+      //    cross-site cookie delivery on POST requests.
       if (!["GET", "HEAD", "OPTIONS"].includes(req.method)) {
-        const origin = req.headers.get("origin");
-        if (origin) {
-          let originHost: string;
-          let originHostname: string;
-          try {
-            const parsed = new URL(origin);
-            originHost = parsed.host;
-            originHostname = parsed.hostname;
-          } catch {
-            return NextResponse.json(
-              { error: { code: "BAD_ORIGIN", message: "Invalid origin header." } },
-              { status: 403 }
-            );
+        const csrfRejected = (reason: string): NextResponse =>
+          NextResponse.json(
+            { error: { code: "CSRF_REJECTED", message: "Cross-origin request rejected." } },
+            { status: 403, headers: { "X-CSRF-Reason": reason } }
+          );
+
+        const jar = await cookies();
+        const cookieToken = jar.get(CSRF_COOKIE)?.value;
+        const headerToken = req.headers.get("x-csrf-token");
+
+        if (cookieToken !== undefined || headerToken !== null) {
+          const a = Buffer.from(cookieToken ?? "");
+          const b = Buffer.from(headerToken ?? "");
+          const tokensMatch = a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
+          if (!tokensMatch) {
+            return csrfRejected("token_mismatch");
           }
-          const forwardedHost = req.headers.get("x-forwarded-host");
-          const host = forwardedHost?.split(",")[0]?.trim() || req.headers.get("host") || "";
-          const hostNoPort = host.split(":")[0] ?? "";
-          if (originHost !== host && originHostname !== hostNoPort) {
-            return NextResponse.json(
-              { error: { code: "CSRF_REJECTED", message: "Cross-origin request rejected." } },
-              { status: 403 }
-            );
+        } else {
+          const fetchSite = req.headers.get("sec-fetch-site");
+          if (fetchSite === "cross-site") {
+            return csrfRejected("cross_site_fetch");
+          }
+          if (fetchSite === null) {
+            // No token, no fetch metadata: fall back to the origin comparison.
+            const origin = req.headers.get("origin");
+            if (origin) {
+              let originHost = "";
+              let originHostname = "";
+              try {
+                const parsed = new URL(origin);
+                originHost = parsed.host;
+                originHostname = parsed.hostname;
+              } catch {
+                return csrfRejected("bad_origin");
+              }
+              const forwardedHost = req.headers.get("x-forwarded-host");
+              const host = forwardedHost?.split(",")[0]?.trim() || req.headers.get("host") || "";
+              const hostNoPort = host.split(":")[0] ?? "";
+              if (originHost !== host && originHostname !== hostNoPort) {
+                return csrfRejected("origin_mismatch");
+              }
+            }
           }
         }
       }

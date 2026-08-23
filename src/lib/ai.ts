@@ -28,7 +28,7 @@ interface ScoredProduct {
   score: number;
 }
 
-// ── Retrieval ────────────────────────────────────────────────────────────────
+// Retrieval
 
 const STOP_WORDS = new Set([
   "show", "me", "find", "looking", "for", "the", "a", "an", "under", "over", "below", "above",
@@ -104,7 +104,7 @@ export async function retrieveCatalog(query: string, limit = 6): Promise<Retriev
   return scored.slice(0, limit).map((s) => s.product);
 }
 
-// ── Prompt construction ──────────────────────────────────────────────────────
+// Prompt construction
 
 function buildSystemPrompt(catalog: RetrievedProduct[]): string {
   const lines = catalog
@@ -128,7 +128,7 @@ function buildSystemPrompt(catalog: RetrievedProduct[]): string {
   ].join("\n");
 }
 
-// ── Fallback (deterministic, no LLM) ────────────────────────────────────────
+// Fallback (deterministic, no LLM)
 
 function fallbackReply(products: RetrievedProduct[]): string {
   if (products.length === 0) {
@@ -141,7 +141,7 @@ function fallbackReply(products: RetrievedProduct[]): string {
   return `Here are the top matches from our marketplace:\n\n${bullets}\n\nTap a card below to view details.`;
 }
 
-// ── Main entry ───────────────────────────────────────────────────────────────
+// Main entry
 
 export interface AssistantReply {
   sessionId: string;

@@ -46,7 +46,7 @@ export function HomeView() {
 
   return (
     <div className="space-y-10">
-      {/* ── Hero ─────────────────────────────────────────────────────────── */}
+      {/* Hero */}
       {!hasFilters && (
         <motion.section
           initial={{ opacity: 0, y: 12 }}
@@ -95,7 +95,7 @@ export function HomeView() {
         </motion.section>
       )}
 
-      {/* ── Storefronts ──────────────────────────────────────────────────── */}
+      {/* Storefronts */}
       {!hasFilters && storesData && (
         <section aria-label="Featured storefronts">
           <h2 className="mb-3 text-lg font-semibold tracking-tight">Storefronts</h2>
@@ -119,7 +119,7 @@ export function HomeView() {
         </section>
       )}
 
-      {/* ── Catalog ──────────────────────────────────────────────────────── */}
+      {/* Catalog */}
       <section id="catalog" aria-label="Product catalog" className="scroll-mt-32 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-lg font-semibold tracking-tight">

@@ -219,7 +219,7 @@ export function VendorDashboard() {
             <TabsTrigger value="payouts">Payouts</TabsTrigger>
           </TabsList>
 
-          {/* ── Orders tab ── */}
+          {/* Orders tab */}
           <TabsContent value="orders" className="space-y-3">
             {ordersLoading ? (
               <Skeleton className="h-48 rounded-xl" />
@@ -265,7 +265,7 @@ export function VendorDashboard() {
             )}
           </TabsContent>
 
-          {/* ── Products tab ── */}
+          {/* Products tab */}
           <TabsContent value="products" className="space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-sm text-muted-foreground">{productsData?.items.length ?? 0} products</p>
@@ -319,7 +319,7 @@ export function VendorDashboard() {
             </div>
           </TabsContent>
 
-          {/* ── Payouts tab ── */}
+          {/* Payouts tab */}
           <TabsContent value="payouts" className="space-y-3">
             {(payoutsData?.payouts ?? []).length === 0 ? (
               <div className="rounded-xl border border-dashed py-12 text-center text-sm text-muted-foreground">
@@ -358,7 +358,7 @@ export function VendorDashboard() {
           </TabsContent>
         </Tabs>
 
-        {/* ── Realtime feed ── */}
+        {/* Realtime feed */}
         <aside className="space-y-3 rounded-xl border p-4" aria-label="Realtime activity">
           <div className="flex items-center justify-between">
             <h2 className="flex items-center gap-1.5 text-sm font-semibold">
@@ -391,7 +391,7 @@ export function VendorDashboard() {
         </aside>
       </div>
 
-      {/* ── Product dialog ── */}
+      {/* Product dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="custom-scroll max-h-[90vh] max-w-lg overflow-y-auto sm:max-w-lg">
           <DialogHeader>

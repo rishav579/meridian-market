@@ -116,7 +116,7 @@ export function AiAssistant() {
                 <Sparkles className="size-4.5" aria-hidden />
                 <div>
                   <p className="text-sm font-semibold leading-tight">Aria</p>
-                  <p className="text-[11px] opacity-80">AI shopping assistant · knows the live catalog</p>
+                  <p className="text-[11px] opacity-80">AI shopping assistant</p>
                 </div>
               </div>
               <Button size="icon" variant="ghost" className="size-8 text-primary-foreground hover:bg-white/20 hover:text-primary-foreground" onClick={closeAssistant} aria-label="Close assistant">

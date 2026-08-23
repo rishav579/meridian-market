@@ -1,7 +1,5 @@
-// ─────────────────────────────────────────────────────────────────────────────
 // Domain constants & literal union types (single source of truth).
 // SQLite/Prisma stores these as String; Zod + TS keep them type-safe end-to-end.
-// ─────────────────────────────────────────────────────────────────────────────
 
 export const ROLES = ["ADMIN", "VENDOR", "CUSTOMER"] as const;
 export type Role = (typeof ROLES)[number];

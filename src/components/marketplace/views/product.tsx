@@ -173,8 +173,8 @@ export function ProductView({ id }: { id: string }) {
           <div className="mt-2 flex items-start gap-2 rounded-lg border bg-muted/40 p-3 text-xs text-muted-foreground">
             <ShieldCheck className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
             <span>
-              Split payment: {p.store.name} receives {money(Math.round(p.priceCents * 0.9))} (90%), Meridian platform
-              commission {money(Math.round(p.priceCents * 0.1))} (10%) — computed per store rate at checkout.
+              Of this price, {p.store.name} keeps {money(Math.round(p.priceCents * 0.9))}. A
+              {" "}{money(Math.round(p.priceCents * 0.1))} marketplace fee (10%) keeps Meridian running.
             </span>
           </div>
         </div>

@@ -71,3 +71,18 @@ Work Log:
 
 Stage Summary:
 - Preview iframe rendering restored; single-line config fix, no behavior changes elsewhere; realtime/AI/checkout paths unaffected
+
+---
+Task ID: hotfix-2
+Agent: Z.ai Code (principal)
+Task: Fix admin login "Cross-origin request rejected" on the preview domain + humanize the project
+
+Work Log:
+- Diagnosed via user screenshot + VLM: preview runs at preview-chat-*.space-z.ai (iframe); browser sends Origin https://preview-chat-... but the proxy chain does not preserve that Host down to Next.js, so the Origin-vs-Host CSRF check rejected ALL mutations (login included). Reproduced with curl: POST /api/auth/login with foreign origin → 403 CSRF_REJECTED
+- Rewrote CSRF verification in src/lib/api.ts as a layered, proxy-agnostic strategy: (1) double-submit token — mk_csrf cookie must equal x-csrf-token header (timingSafeEqual); (2) Fetch Metadata — reject Sec-Fetch-Site: cross-site; (3) legacy Origin-vs-Host only when neither signal exists (non-browser clients). Session cookie already SameSite=Lax
+- Verified: preview-domain login with valid token → 200 (admin account); cross-site fetch w/o token → 403; forged token → 403; agent-browser full flow: quick-fill Admin → Sign in → "Welcome, Ada" → dashboard GMV KPIs → commission PATCH mutation → toast success; commission reset to 10%
+- Humanization pass ("make this project made by a human"): removed machine tells from UI copy — footer now "All rights reserved" + maker-focused description, checkout receipt "How your payment was split" / "Marketplace fee (10%)" / no webhook jargon, product page maker-keeps explainer, assistant subtitle simplified, demo block "Just exploring? Fill a demo account:". Normalized ALL box-drawing divider comments (───) across src/, prisma/schema.prisma to plain // comments via string-surgery script (heredoc transport intermittently corrupts backslashes/unicode in patterns — noted; wrote scripts to files instead, then removed them)
+- Updated README security section to describe the new layered CSRF strategy; lint clean; dev.log no fatal errors
+
+Stage Summary:
+- Login on the preview domain works for all roles; CSRF posture stronger than before (token equality + fetch metadata, immune to proxy Host rewriting); UI and code comments read naturally, zero functional regressions

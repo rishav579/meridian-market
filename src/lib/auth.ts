@@ -28,7 +28,7 @@ export interface SessionUser {
   } | null;
 }
 
-// ── Passwords (scrypt, N=16327) ──────────────────────────────────────────────
+// Passwords (scrypt, N=16327)
 
 export function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
@@ -44,7 +44,7 @@ export function verifyPassword(password: string, stored: string): boolean {
   return derived.length === expected.length && timingSafeEqual(derived, expected);
 }
 
-// ── Sessions ─────────────────────────────────────────────────────────────────
+// Sessions
 
 export async function createSession(userId: string): Promise<string> {
   const token = randomBytes(32).toString("hex");
@@ -103,7 +103,7 @@ export async function destroySession(): Promise<void> {
   jar.delete(SESSION_COOKIE);
 }
 
-// ── Guest identity (cart / chat continuity pre-login) ───────────────────────
+// Guest identity (cart / chat continuity pre-login)
 
 export async function getOrCreateGuestToken(): Promise<string> {
   const jar = await cookies();
@@ -125,7 +125,7 @@ export async function readGuestToken(): Promise<string | null> {
   return jar.get(GUEST_CART_COOKIE)?.value ?? null;
 }
 
-// ── Realtime tickets (short-lived HMAC, authorizes socket.io room joins) ────
+// Realtime tickets (short-lived HMAC, authorizes socket.io room joins)
 
 export interface RealtimeTicket {
   sub: string;

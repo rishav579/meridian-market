@@ -44,7 +44,7 @@ export interface PaymentIntentResult {
   status: "requires_capture" | "succeeded";
 }
 
-// ── Payment lifecycle ────────────────────────────────────────────────────────
+// Payment lifecycle
 
 export function createPaymentIntent(amountCents: number): PaymentIntentResult {
   const id = `pi_${randomBytes(12).toString("hex")}`;
@@ -90,7 +90,7 @@ export function computeSplits(lines: SplitLine[]): SplitResult {
   return { lines: out, subtotal, commissionTotal, vendorTotal };
 }
 
-// ── Webhook signing & verification (mirrors stripe constructEvent) ──────────
+// Webhook signing & verification (mirrors stripe constructEvent)
 
 export function signWebhook(payload: string, timestamp = Date.now()): string {
   const mac = createHmac("sha256", WEBHOOK_SECRET).update(`${timestamp}.${payload}`).digest("hex");
@@ -124,7 +124,7 @@ export function verifyWebhookSignature(payload: string, signatureHeader: string 
   return { valid: true };
 }
 
-// ── Event factory ────────────────────────────────────────────────────────────
+// Event factory
 
 export interface WebhookEvent {
   id: string;

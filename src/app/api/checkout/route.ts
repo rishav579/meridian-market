@@ -49,7 +49,7 @@ export const POST = withApi(
 
     const intent = createPaymentIntent(preview.subtotal);
 
-    // ── Atomic order creation ────────────────────────────────────────────────
+    // Atomic order creation
     const order = await db.$transaction(async (tx) => {
       const count = await tx.order.count();
       const orderNumber = `MK-${new Date().getFullYear()}-${String(count + 1).padStart(6, "0")}`;
@@ -108,7 +108,7 @@ export const POST = withApi(
       return created;
     });
 
-    // ── Payment capture + Connect transfers (simulated) ──────────────────────
+    // Payment capture + Connect transfers (simulated)
     const { split } = captureWithSplits(intent.id, splitInput);
 
     await db.payout.createMany({
@@ -121,7 +121,7 @@ export const POST = withApi(
       })),
     });
 
-    // ── Deliver signed webhook to our own endpoint (payment settles order) ──
+    // Deliver signed webhook to our own endpoint (payment settles order)
     let webhookDelivered = false;
     try {
       const { payload, signature } = buildEvent("payment_intent.succeeded", {
