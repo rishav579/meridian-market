@@ -56,3 +56,18 @@ Work Log:
 
 Stage Summary:
 - Production-ready marketplace verified end-to-end in browser; all money paths exact (per-line rounding, single rounding point); realtime, RBAC, approval workflow, AI RAG and webhook verification all live-verified; docs by Task 7-b (README w/ 3 Mermaid diagrams, DECISIONS.md 12 ADRs, Dockerfile, compose, CI, .env.example)
+
+---
+Task ID: hotfix-1
+Agent: Z.ai Code (principal)
+Task: Preview panel "refused to connect" — root cause & fix
+
+Work Log:
+- Diagnosed: preview embeds the app in an iframe; next.config.ts sent X-Frame-Options: DENY on every response → browser refused to render the frame ("refused to connect")
+- Removed X-Frame-Options from securityHeaders (kept nosniff / Referrer-Policy / Permissions-Policy / DNS-prefetch), left inline comment + production guidance (frame-ancestors at the edge)
+- Verified dev server auto-restarted on config change: curl -I via gateway :81 no longer returns X-Frame-Options; app 200; /api/health ok
+- Proved the embed scenario: wrapper page iframing http://127.0.0.1:81/ loads fully (HMR connected, product images fetched 304 through gateway, zero X-Frame refusal console errors)
+- Updated README security section with a note about the intentional omission in the sandbox
+
+Stage Summary:
+- Preview iframe rendering restored; single-line config fix, no behavior changes elsewhere; realtime/AI/checkout paths unaffected
