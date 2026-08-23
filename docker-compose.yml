@@ -1,0 +1,60 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Meridian Market — local single-host stack
+#
+#   docker compose up --build
+#     migrate  → one-shot: prisma db push + seed, then exits
+#     app      → Next.js standalone server on :3000 (multi-stage, non-root)
+#     realtime → socket.io on :3003, emit control plane on :3004
+#
+# Networking note (host mode): the realtime control plane binds 127.0.0.1:3004
+# by design (src contract in mini-services/realtime/index.ts) and the app
+# self-delivers signed webhooks to 127.0.0.1:3000. Running app + realtime with
+# `network_mode: host` preserves both loopback contracts exactly as in local
+# dev; all three ports are then directly reachable on the host.
+#
+# Bridge-network variant: change the control-plane bind to 0.0.0.0 in
+# mini-services/realtime/index.ts (and firewall 3004), drop the
+# `network_mode: host` lines, and uncomment the port mappings below.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  migrate:
+    build:
+      context: .
+      target: builder
+    env_file: .env
+    volumes:
+      - db-data:/app/db
+    command: sh -c "bunx prisma db push --accept-data-loss && bun prisma/seed.ts"
+    restart: "no"
+
+  app:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      INTERNAL_API_BASE: http://127.0.0.1:3000   # self-delivered webhook target
+      REALTIME_INTERNAL_URL: http://127.0.0.1:3004 # emit control plane
+    volumes:
+      - db-data:/app/db
+    network_mode: host          # app listens on host :3000
+    # ports:
+    #   - "3000:3000"
+    restart: unless-stopped
+
+  realtime:
+    build: ./mini-services/realtime
+    env_file: .env
+    network_mode: host          # socket.io :3003 (public) + control :3004 (loopback)
+    # ports:
+    #   - "3003:3003"           # socket.io — engine.io owns "/"
+    #   - "127.0.0.1:3004:3004" # control plane — never expose off-host
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  db-data:

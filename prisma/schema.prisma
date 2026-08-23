@@ -1,0 +1,220 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Multi-Vendor AI-Enhanced Marketplace — Prisma Schema
+// ─────────────────────────────────────────────────────────────────────────────
+// Design notes:
+//  • All money is stored as INTEGER cents (no floating point money, ever).
+//  • Roles/order-statuses are constrained Strings + a Zod type-layer because
+//    this deployment targets SQLite; switching `provider` to "postgresql"
+//    and converting the String unions to `enum` blocks is the only change
+//    required for a Postgres deployment.
+//  • Every foreign key used in a hot query path is indexed.
+//  • OrderItem snapshots price/product/store names at purchase time so
+//    vendor reports stay correct even if catalog rows change later.
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(cuid())
+  email        String        @unique
+  passwordHash String
+  name         String
+  // 'ADMIN' | 'VENDOR' | 'CUSTOMER'  (enforced by src/lib/constants.ts + Zod)
+  role         String        @default("CUSTOMER")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  store        Store?
+  orders       Order[]
+  cart         Cart?
+  sessions     Session[]
+  chatSessions ChatSession[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Store {
+  id             String      @id @default(cuid())
+  name           String
+  slug           String      @unique
+  description    String
+  logoEmoji      String      @default("🏬")
+  // 'PENDING' | 'ACTIVE' | 'SUSPENDED'
+  status         String      @default("PENDING")
+  commissionRate Float       @default(0.1) // platform commission (10%)
+  vendorId       String      @unique
+  vendor         User        @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  products       Product[]
+  payouts        Payout[]
+  orderItems     OrderItem[]
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([status])
+}
+
+model Product {
+  id             String      @id @default(cuid())
+  name           String
+  slug           String      @unique
+  description    String
+  priceCents     Int
+  compareAtPriceCents Int? // optional strike-through price
+  imageUrl       String
+  category       String
+  tags           String      @default("") // comma-separated keywords for search/RAG
+  stock          Int         @default(0)
+  rating         Float       @default(0)
+  reviewCount    Int         @default(0)
+  featured       Boolean     @default(false)
+  storeId        String
+  store          Store       @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  orderItems     OrderItem[]
+  cartItems      CartItem[]
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([category])
+  @@index([storeId])
+  @@index([featured])
+}
+
+model Cart {
+  id         String     @id @default(cuid())
+  userId     String?    @unique
+  user       User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guestToken String?    @unique // identifies guest carts pre-login
+  items      CartItem[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+}
+
+model CartItem {
+  id        String   @id @default(cuid())
+  cartId    String
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity  Int      @default(1)
+  unitPrice Int // cents, snapshotted when added
+  createdAt DateTime @default(now())
+
+  @@unique([cartId, productId])
+  @@index([productId])
+}
+
+model Order {
+  id              String        @id @default(cuid())
+  orderNumber     String        @unique // human-friendly, e.g. MK-2026-000123
+  userId          String?
+  user            User?         @relation(fields: [userId], references: [id])
+  guestEmail      String?
+  customerName    String
+  status          String        @default("PENDING")
+  subtotal        Int // cents, sum of line totals
+  commissionTotal Int // cents, platform earnings
+  shippingFee     Int           @default(0)
+  total           Int // subtotal + shippingFee
+  paymentIntentId String?       @unique // simulated Stripe PaymentIntent
+  shippingName    String
+  shippingLine1   String
+  shippingCity    String
+  shippingState   String?
+  shippingPostal  String
+  shippingCountry String        @default("US")
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  items           OrderItem[]
+  events          OrderEvent[]
+  payouts         Payout[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id            String   @id @default(cuid())
+  orderId       String
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId     String?
+  product       Product? @relation(fields: [productId], references: [id])
+  storeId       String
+  store         Store    @relation(fields: [storeId], references: [id])
+  // snapshots — reports stay historically accurate
+  productName   String
+  storeName     String
+  imageUrl      String
+  unitPrice     Int
+  quantity      Int
+  lineTotal     Int
+  commissionRate Float
+  commission    Int // platform cut for this line
+  vendorEarnings Int // vendor cut for this line
+
+  @@index([orderId])
+  @@index([storeId])
+}
+
+model OrderEvent {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  status    String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+}
+
+model Payout {
+  id         String   @id @default(cuid())
+  storeId    String
+  store      Store    @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  orderId    String?
+  order      Order?   @relation(fields: [orderId], references: [id])
+  amount     Int // vendor earnings in cents
+  // 'PENDING' | 'AVAILABLE' | 'PAID'
+  status     String   @default("PENDING")
+  transferId String? // simulated Stripe Connect transfer id
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([storeId])
+  @@index([status])
+}
+
+model ChatSession {
+  id        String        @id @default(cuid())
+  userId    String?
+  user      User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  ChatMessage[]
+  createdAt DateTime      @default(now())
+}
+
+model ChatMessage {
+  id        String      @id @default(cuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // 'user' | 'assistant'
+  role      String
+  content   String
+  createdAt DateTime    @default(now())
+
+  @@index([sessionId])
+}

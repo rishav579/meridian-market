@@ -1,0 +1,17 @@
+# Keep build contexts small and reproducible.
+node_modules
+.next
+.git
+.github
+.env
+.env.*
+!.env.example
+db
+*.db
+dev.log
+server.log
+download
+examples
+tests
+scripts
+mini-services
