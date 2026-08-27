@@ -13,7 +13,7 @@ A full-stack, production-shaped marketplace: multiple vendors sell through one s
 - **Product CRUD** — vendors manage only their own catalog (`NOT_OWNER` enforcement); admins manage any store via `?storeSlug=`. Public catalog search supports query, category, price range, featured filter, five sort modes and pagination, behind a 10-second response cache.
 - **AI shopping assistant (RAG-lite)** — natural-language product Q&A over the live catalog: budget/keyword extraction, scored retrieval (name/tags/category/description + rating and featured boosts) over ACTIVE stores, context-injected LLM call via `z-ai-web-dev-sdk`, full chat persistence, and a deterministic fallback reply when the LLM is unavailable (`degraded` flag surfaced to the UI).
 - **Persistent guest + user cart with merge-on-login** — guests get an httpOnly 30-day guest-token cart; on login the guest cart is merged into the user cart inside a transaction (quantities summed, capped to stock and 20 per line) and the guest row deleted. Prices are snapshotted server-side — never trusted from the client.
-- **Checkout with simulated Stripe Connect split payments** — one interactive Prisma transaction creates the `PENDING` order with fully snapshotted line items, decrements stock and clears the cart; the capture step computes per-store commission splits (10% platform cut) and issues one Connect "transfer" per store with `Payout` rows. The order number format is `MK-<year>-<000000>`.
+- **Checkout with simulated Stripe Connect split payments** — one interactive Prisma transaction creates the `PENDING` order with fully snapshotted line items, decrements stock atomically with database-level availability guards, creates transactional `Payout` rows, and clears the cart. Supports client idempotency via `Idempotency-Key` headers and database uniqueness constraints. The order number format is `MK-<year>-<random-hex>`.
 - **Signed webhooks** — the checkout flow delivers a `payment_intent.succeeded` webhook **to this app's own endpoint**, signed `t=<ts>,v1=<HMAC-SHA256>` over `<ts>.<payload>`, verified with timing-safe comparison and a 5-minute replay window *before* the body is parsed. Only the webhook flips an order to `PAID` and payouts to `AVAILABLE` (a direct-settlement fallback exists if self-delivery fails).
 - **Realtime vendor order feeds via socket.io rooms** — a small dedicated service (engine.io owns `/` on :3003) pushes `order:new`, `order:status` and `payout:update` events to per-user, per-store and admin rooms. Room joins are authorized by a 60-second HMAC ticket minted by `GET /api/realtime/ticket`; the Next.js backend broadcasts through an internal control plane on :3004 guarded by a shared secret.
 - **Rate limiting** — per-IP, per-route, per-method windowed counters on every `withApi` route (real numbers in the [security section](#security)); `429` responses carry `Retry-After` and `X-RateLimit-*` headers.
@@ -177,8 +177,8 @@ Enforced by the `ORDER_TRANSITIONS` state machine in `src/lib/constants.ts` and 
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING : checkout (atomic txn, stock decremented)
-    PENDING --> PAID : payment webhook only<br/>(TRANSITION_AUTHORS: ADMIN = system)
+    [*] --> PENDING : checkout (atomic txn, stock decremented, payouts created)
+    PENDING --> PAID : payment webhook only<br/>(TRANSITION_AUTHORS.PAID: empty, webhook-only)
     PENDING --> CANCELLED : customer / vendor / admin
     PAID --> PROCESSING : vendor / admin
     PAID --> CANCELLED : customer / vendor / admin
@@ -189,7 +189,7 @@ stateDiagram-v2
     CANCELLED --> [*] : restock + reverse payouts
 ```
 
-`PAID` is settable **only** through the payment webhook path (`TRANSITION_AUTHORS.PAID = ["ADMIN"]`, interpreted as the payment system); no human-facing route may mark an order paid.
+`PAID` is settable **only** through the payment webhook path (`TRANSITION_AUTHORS.PAID = []`, interpreted as the payment system webhook only); no human-facing route (including admin) may mark an order paid.
 
 ## Local setup
 
@@ -280,28 +280,27 @@ All routes run through the `withApi` middleware pipeline (rate limit → same-or
 
 ## Testing strategy
 
-Per repository policy, this sandbox build ships **without test files**. The suite below is the recommended layout for the production fork — pure functions (`money`, `rate-limit`, `payments`, `constants`) are fully unit-testable with no mocks, which is precisely why they were extracted.
+**Vitest** provides the automated foundation (`npm test`, 68 tests, no external services): unit suites over the pure modules, plus integration suites that drive the **real route handlers through the `withApi` pipeline against a throwaway SQLite database** provisioned from the actual Prisma schema (`tests/global-setup.ts`). The LLM SDK is mocked offline so the deterministic fallback path is exercised deterministically.
 
 ```text
 tests/
+  global-setup.ts          # prisma db push → fresh temp SQLite per run
+  setup.ts                 # next/headers cookie-jar mock for route handlers
+  helpers/test-utils.ts    # NextRequest builder, session/DB fixtures, resetDb
   unit/
-    money.test.ts
-    rate-limit.test.ts
-    payments.test.ts        # signature verify + replay rejection
-    order-machine.test.ts   # ORDER_TRANSITIONS / TRANSITION_AUTHORS table
-    ai-retrieval.test.ts    # tokenize, budget extraction, scoring
+    money.test.ts          # half-up commission rounding, cent conservation
+    order-machine.test.ts  # ORDER_TRANSITIONS / TRANSITION_AUTHORS table
+    payments.test.ts       # signature verify, tamper/replay/forgery rejection, splits
   integration/
-    checkout.test.ts        # route handler + real SQLite (transaction, stock, splits)
-    cart-merge.test.ts
-    orders-api.test.ts
-  e2e/
-    guest-checkout.spec.ts  # Playwright
-    vendor-realtime.spec.ts
+    checkout.test.ts       # one atomic order, live-price snapshotting, stock guard, cart clear
+    auth-rbac.test.ts      # 401 gate, role matrix, IDOR, vendor tenant scoping
+    webhook.test.ts        # signed settle, idempotent replay, unsigned-forgery rejection
+    ai-assistant.test.ts   # budget extraction, ACTIVE-store retrieval, degraded fallback, chat persistence
 ```
 
-- **Unit (vitest)** — `money.test.ts`: "rounds commission half-up per line", "never loses a cent: commission + vendorEarnings === lineTotal", "rejects non-integer cents". `rate-limit.test.ts`: "allows exactly N requests then 429s", "resets after the window elapses", "sweeps expired windows". `payments.test.ts`: "accepts a correctly signed payload", "rejects a tampered body", "rejects a signature older than 5 minutes (replay window)", "rejects a malformed header". `order-machine.test.ts`: "permits only ORDER_TRANSITIONS[from] targets", "PAID has no human authors", "CANCELLED is terminal".
-- **Integration (vitest + a throwaway SQLite file)** — `checkout.test.ts`: "creates order + items + event and decrements stock atomically", "snapshots prices at checkout time", "rejects checkout when stock is insufficient (409)", "flips order to PAID only via the webhook", "marks payouts AVAILABLE after settlement". `cart-merge.test.ts`: "sums quantities across guest and user carts, caps to stock and 20", "deletes the guest cart after merge", "keeps a server-side unit price".
-- **E2E (Playwright against `bun run dev` + realtime service)** — `guest-checkout.spec.ts`: "guest adds to cart, checks out with email, sees order confirmation"; `vendor-realtime.spec.ts`: "vendor receives order:new in the store room within 2s of checkout"; "admin approves PENDING store and products appear in catalog".
+- **Unit (vitest)** — `money.test.ts`: "rounds commission half-up per line", "never loses a cent: commission + vendorEarnings === lineTotal". `payments.test.ts`: "accepts a correctly signed payload", "rejects a tampered body", "rejects a signature older than 5 minutes (replay window)", "rejects signatures minted with the wrong secret". `order-machine.test.ts`: "permits only ORDER_TRANSITIONS[from] targets", "PAID has no CUSTOMER/VENDOR authors", "DELIVERED/CANCELLED are terminal".
+- **Integration (vitest + real route handlers + throwaway SQLite)** — `checkout.test.ts`: "creates exactly one order atomically and clears the cart", "prices the order from the live catalog at checkout time (server-side authority)", "rejects checkout when stock became insufficient (409) and creates nothing", "supports guest checkout", "marks payouts AVAILABLE after settlement". `auth-rbac.test.ts`: "unauthenticated protected API → 401", "customer → admin stats 403", "customer cannot read/transition another customer's order", "vendor NOT_OWNER on foreign products", "vendor order lists/details/payouts scoped to its own store". `webhook.test.ts`: "valid signature flips order to PAID + payouts AVAILABLE", "replaying the settled event is a no-op", "unsigned frontend-style JSON cannot settle payments", "expired timestamps rejected". `ai-assistant.test.ts`: "'under $X'/'over $X' budget filters", "only ACTIVE-store in-stock products retrieved", "deterministic rating-ranked fallback when nothing matches", "degraded=true with grounded recommendations when the LLM is unavailable", "chat history persisted across turns".
+- **Not yet covered (planned):** `rate-limit` unit tests, cart-merge integration tests, and the Playwright E2E layer (`guest-checkout.spec.ts`, `vendor-realtime.spec.ts`) remain the recommended additions for a production fork.
 
 ## Deployment
 

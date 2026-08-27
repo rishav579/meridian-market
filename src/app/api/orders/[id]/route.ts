@@ -16,7 +16,7 @@ import type { SessionUser } from "@/lib/auth";
 
 interface Ctx {
   params: Promise<{ id: string }>;
-  user: SessionUser | null;
+  user?: SessionUser | null;
 }
 
 async function loadOrder(id: string) {
@@ -76,8 +76,12 @@ export const PATCH = withApi<Ctx>(
     }
 
     // Role authorship (PAID is webhook-only)
+    if (to === "PAID") {
+      throw new ApiError(403, "FORBIDDEN", "PAID status can only be set by the payment webhook.");
+    }
+
     const authors = TRANSITION_AUTHORS[to] ?? [];
-    const roleAllowed = user.role === "ADMIN" || authors.includes(user.role);
+    const roleAllowed = authors.includes(user.role);
     const vendorMayAct = isVendorParticipant && authors.includes("VENDOR");
     const customerMayAct = isOwner && authors.includes("CUSTOMER") && (from === "PENDING" || from === "PAID");
     if (!(roleAllowed || vendorMayAct || customerMayAct)) {

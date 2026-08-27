@@ -95,11 +95,13 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
+    // Defer the initial snapshot out of the effect body (react-hooks/set-state-in-effect)
+    const initial = setTimeout(() => onSelect(api), 0)
     api.on("reInit", onSelect)
     api.on("select", onSelect)
 
     return () => {
+      clearTimeout(initial)
       api?.off("select", onSelect)
     }
   }, [api, onSelect])

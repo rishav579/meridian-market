@@ -118,6 +118,7 @@ model CartItem {
 model Order {
   id              String        @id @default(cuid())
   orderNumber     String        @unique // human-friendly, e.g. MK-2026-000123
+  idempotencyKey  String?       @unique // client-supplied or generated idempotency token
   userId          String?
   user            User?         @relation(fields: [userId], references: [id])
   guestEmail      String?

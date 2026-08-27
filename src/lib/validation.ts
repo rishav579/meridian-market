@@ -75,6 +75,7 @@ export const checkoutSchema = z.object({
   state: z.string().trim().max(80).optional().or(z.literal("")),
   postal: safeText(20),
   country: z.string().trim().length(2).default("US"),
+  idempotencyKey: z.string().trim().min(1).max(255).optional(),
 });
 
 export const orderStatusPatchSchema = z.object({

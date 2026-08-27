@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# npm artifacts — this repo standardizes on bun.lock
+/package-lock.json
+
 
 # typescript
 *.tsbuildinfo

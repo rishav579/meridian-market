@@ -6,7 +6,7 @@ import { cacheInvalidatePrefix } from "@/lib/cache";
 
 interface Ctx {
   params: Promise<{ id: string }>;
-  user: import("@/lib/auth").SessionUser | null;
+  user?: import("@/lib/auth").SessionUser | null;
 }
 
 export const GET = withApi<Ctx>(

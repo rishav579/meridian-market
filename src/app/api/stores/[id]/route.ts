@@ -8,7 +8,7 @@ import type { SessionUser } from "@/lib/auth";
 
 interface Ctx {
   params: Promise<{ id: string }>;
-  user: SessionUser | null;
+  user?: SessionUser | null;
 }
 
 /** PATCH /api/stores/:id — admin moderation: approve / suspend / set commission. */

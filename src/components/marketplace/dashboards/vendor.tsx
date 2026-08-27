@@ -91,7 +91,8 @@ export function VendorDashboard() {
   }, [ordersData]);
 
   if (!user?.store) return null;
-  const store = user.store;
+  // The session payload does not include the store emoji; fall back like the API does.
+  const store = user.store as typeof user.store & { logoEmoji?: string };
 
   const openCreate = () => {
     setEditing(null);

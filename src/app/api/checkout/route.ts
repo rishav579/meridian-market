@@ -3,29 +3,77 @@
  *
  * Money flow (simulated Stripe Connect, destination-charge model):
  *  1. Lock stock validation + compute per-line commission split (store rate).
- *  2. Create Order (PENDING) + snapshotted OrderItems + OrderEvent, decrement
- *     stock — all inside one interactive transaction (atomic).
- *  3. "Capture" the PaymentIntent and issue per-store transfers (10% platform
- *     commission by default), recording Payout rows (PENDING → funds held).
- *  4. Deliver a signed `payment_intent.succeeded` webhook to OUR OWN webhook
+ *  2. Create Order (PENDING) + snapshotted OrderItems + OrderEvent + Payouts, decrement
+ *     stock atomically with gte condition — all inside one interactive transaction (atomic).
+ *  3. Deliver a signed `payment_intent.succeeded` webhook to OUR OWN webhook
  *     endpoint, which flips the order to PAID, payouts to AVAILABLE and pushes
  *     realtime events — proving the webhook path works exactly as in prod.
+ *  4. Idempotent: supports `Idempotency-Key` header and body key, deduplicating
+ *     duplicate submissions safely at the database level.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
+import { randomBytes } from "node:crypto";
 import { db } from "@/lib/db";
 import { withApi, parseBody, ApiError } from "@/lib/api";
 import { checkoutSchema } from "@/lib/validation";
 import { resolveCart, requireCartStock } from "@/lib/cart";
-import { createPaymentIntent, captureWithSplits, buildEvent, computeSplits } from "@/lib/payments";
+import { createPaymentIntent, buildEvent, computeSplits } from "@/lib/payments";
 import { emitRealtime, roomsForOrder } from "@/lib/realtime";
 
 const INTERNAL_BASE = process.env.INTERNAL_API_BASE ?? "http://127.0.0.1:3000";
+
+function makeIdempotentResponse(existing: any) {
+  return NextResponse.json(
+    {
+      order: existing,
+      payment: {
+        intentId: existing.paymentIntentId,
+        status: "succeeded",
+        platformCommissionCents: existing.commissionTotal,
+        transfers: existing.payouts.map((p: any) => ({
+          storeName: p.store?.name ?? "Store",
+          transferId: p.transferId ?? "",
+          vendorEarningsCents: p.amount,
+        })),
+        webhookDelivered: true,
+      },
+    },
+    { status: 200 }
+  );
+}
 
 export const POST = withApi(
   { rateLimit: { limit: 8, windowMs: 60_000 } },
   async (req, { user }) => {
     const input = await parseBody(req, checkoutSchema);
+    const headerKey = req.headers.get("idempotency-key") || req.headers.get("x-idempotency-key");
+    const idempotencyKey = (headerKey || input.idempotencyKey)?.trim() || null;
+
+    // Idempotency: return existing order if previously processed with this key
+    if (idempotencyKey) {
+      const existing = await db.order.findUnique({
+        where: { idempotencyKey },
+        include: {
+          items: true,
+          events: { orderBy: { createdAt: "asc" } },
+          payouts: { include: { store: true } },
+        },
+      });
+
+      if (existing) {
+        // Security boundary: ensure the key owner matches
+        if (
+          (existing.userId && existing.userId !== user?.id) ||
+          (!existing.userId && existing.guestEmail !== input.email)
+        ) {
+          throw new ApiError(403, "FORBIDDEN", "Idempotency key belongs to another customer.");
+        }
+
+        return makeIdempotentResponse(existing);
+      }
+    }
+
     const cartId = await resolveCart(user);
 
     const cart = await db.cart.findUnique({
@@ -48,85 +96,134 @@ export const POST = withApi(
     const preview = computeSplits(splitInput);
 
     const intent = createPaymentIntent(preview.subtotal);
+    const orderNumber = `MK-${new Date().getFullYear()}-${randomBytes(4).toString("hex").toUpperCase()}`;
 
-    // Atomic order creation
-    const order = await db.$transaction(async (tx) => {
-      const count = await tx.order.count();
-      const orderNumber = `MK-${new Date().getFullYear()}-${String(count + 1).padStart(6, "0")}`;
+    // Atomic order creation + inventory decrement + payouts creation + cart clearance
+    let order;
+    try {
+      order = await db.$transaction(async (tx) => {
+        // 1. Atomic conditional stock decrement inside transaction (prevents TOCTOU/negative stock)
+        for (const item of cart.items) {
+          const product = item.product!;
+          const updated = await tx.product.updateMany({
+            where: {
+              id: product.id,
+              stock: { gte: item.quantity },
+            },
+            data: {
+              stock: { decrement: item.quantity },
+            },
+          });
 
-      const created = await tx.order.create({
-        data: {
-          orderNumber,
-          userId: user?.id ?? null,
-          guestEmail: user ? null : input.email,
-          customerName: input.shippingName,
-          status: "PENDING",
-          subtotal: preview.subtotal,
-          commissionTotal: preview.commissionTotal,
-          shippingFee: 0,
-          total: preview.subtotal,
-          paymentIntentId: intent.id,
-          shippingName: input.shippingName,
-          shippingLine1: input.line1,
-          shippingCity: input.city,
-          shippingState: input.state || null,
-          shippingPostal: input.postal,
-          shippingCountry: input.country,
-          events: { create: { status: "PENDING", message: "Order placed. Awaiting payment confirmation." } },
-        },
-      });
+          if (updated.count !== 1) {
+            throw new ApiError(
+              409,
+              "INSUFFICIENT_STOCK",
+              `Item ${product.name} is no longer available in the requested quantity.`
+            );
+          }
+        }
 
-      // preview.lines[i] corresponds 1:1 with splitInput[i]/cart.items[i]
-      for (const [index, item] of cart.items.entries()) {
-        const product = item.product!;
-        const computed = preview.lines[index];
-
-        await tx.orderItem.create({
+        // 2. Create Order
+        const created = await tx.order.create({
           data: {
-            orderId: created.id,
-            productId: product.id,
-            storeId: product.storeId,
-            productName: product.name,
-            storeName: product.store.name,
-            imageUrl: product.imageUrl,
-            unitPrice: product.priceCents,
-            quantity: item.quantity,
-            lineTotal: product.priceCents * item.quantity,
-            commissionRate: product.store.commissionRate,
-            commission: computed.commission,
-            vendorEarnings: computed.vendorEarnings,
+            orderNumber,
+            idempotencyKey,
+            userId: user?.id ?? null,
+            guestEmail: user ? null : input.email,
+            customerName: input.shippingName,
+            status: "PENDING",
+            subtotal: preview.subtotal,
+            commissionTotal: preview.commissionTotal,
+            shippingFee: 0,
+            total: preview.subtotal,
+            paymentIntentId: intent.id,
+            shippingName: input.shippingName,
+            shippingLine1: input.line1,
+            shippingCity: input.city,
+            shippingState: input.state || null,
+            shippingPostal: input.postal,
+            shippingCountry: input.country,
+            events: { create: { status: "PENDING", message: "Order placed. Awaiting payment confirmation." } },
           },
         });
 
-        await tx.product.update({
-          where: { id: product.id },
-          data: { stock: { decrement: item.quantity } },
+        // 3. Create snapshotted OrderItems
+        for (const [index, item] of cart.items.entries()) {
+          const product = item.product!;
+          const computed = preview.lines[index];
+
+          await tx.orderItem.create({
+            data: {
+              orderId: created.id,
+              productId: product.id,
+              storeId: product.storeId,
+              productName: product.name,
+              storeName: product.store.name,
+              imageUrl: product.imageUrl,
+              unitPrice: product.priceCents,
+              quantity: item.quantity,
+              lineTotal: product.priceCents * item.quantity,
+              commissionRate: product.store.commissionRate,
+              commission: computed.commission,
+              vendorEarnings: computed.vendorEarnings,
+            },
+          });
+        }
+
+        // 4. Create Payout rows inside the same transaction
+        await tx.payout.createMany({
+          data: preview.lines.map((line) => ({
+            storeId: line.storeId,
+            orderId: created.id,
+            amount: line.vendorEarnings,
+            status: "PENDING",
+            transferId: line.transferId,
+          })),
         });
+
+        // 5. Clear cart inside the same transaction
+        await tx.cartItem.deleteMany({ where: { cartId } });
+        return created;
+      });
+    } catch (err: unknown) {
+      // Concurrent race condition handler for idempotency key unique constraint
+      if (
+        idempotencyKey &&
+        typeof err === "object" &&
+        err !== null &&
+        "code" in err &&
+        (err as { code: string }).code === "P2002"
+      ) {
+        const existing = await db.order.findUnique({
+          where: { idempotencyKey },
+          include: {
+            items: true,
+            events: { orderBy: { createdAt: "asc" } },
+            payouts: { include: { store: true } },
+          },
+        });
+
+        if (existing) {
+          if (
+            (existing.userId && existing.userId !== user?.id) ||
+            (!existing.userId && existing.guestEmail !== input.email)
+          ) {
+            throw new ApiError(403, "FORBIDDEN", "Idempotency key belongs to another customer.");
+          }
+
+          return makeIdempotentResponse(existing);
+        }
       }
-
-      await tx.cartItem.deleteMany({ where: { cartId } });
-      return created;
-    });
-
-    // Payment capture + Connect transfers (simulated)
-    const { split } = captureWithSplits(intent.id, splitInput);
-
-    await db.payout.createMany({
-      data: split.lines.map((line) => ({
-        storeId: line.storeId,
-        orderId: order.id,
-        amount: line.vendorEarnings,
-        status: "PENDING",
-        transferId: line.transferId,
-      })),
-    });
+      throw err;
+    }
 
     // Deliver signed webhook to our own endpoint (payment settles order)
     let webhookDelivered = false;
     try {
       const { payload, signature } = buildEvent("payment_intent.succeeded", {
         id: intent.id,
-        amount: split.subtotal,
+        amount: preview.subtotal,
         currency: "usd",
         metadata: { orderId: order.id },
       });
@@ -156,7 +253,7 @@ export const POST = withApi(
         event: "order:new",
         rooms: roomsForOrder({
           userId: user?.id ?? null,
-          storeIds: [...new Set(split.lines.map((l) => l.storeId))],
+          storeIds: [...new Set(preview.lines.map((l) => l.storeId))],
         }),
         payload: {
           orderId: settled.id,
@@ -181,8 +278,8 @@ export const POST = withApi(
         payment: {
           intentId: intent.id,
           status: "succeeded",
-          platformCommissionCents: split.commissionTotal,
-          transfers: split.lines.map((l) => ({
+          platformCommissionCents: preview.commissionTotal,
+          transfers: preview.lines.map((l) => ({
             storeName: l.storeName,
             transferId: l.transferId,
             vendorEarningsCents: l.vendorEarnings,

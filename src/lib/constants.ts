@@ -51,7 +51,7 @@ export const ORDER_TRANSITIONS: Readonly<Record<OrderStatus, readonly OrderStatu
 
 // Roles allowed to author a given transition (vendor = owner of a store on the order)
 export const TRANSITION_AUTHORS: Partial<Record<OrderStatus, readonly Role[]>> = {
-  PAID: ["ADMIN"], // set exclusively by the payment webhook
+  PAID: [], // set exclusively by the payment webhook; no human role may author PAID
   PROCESSING: ["ADMIN", "VENDOR"],
   SHIPPED: ["ADMIN", "VENDOR"],
   DELIVERED: ["ADMIN", "VENDOR"],

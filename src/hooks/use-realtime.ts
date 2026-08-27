@@ -34,21 +34,25 @@ export function useRealtime(params: {
   const { enabled, onEvent } = params;
   const [status, setStatus] = useState<RealtimeStatus>("off");
   const handlerRef = useRef(onEvent);
-  handlerRef.current = onEvent;
+
+  // Keep the latest handler without touching refs during render.
+  useEffect(() => {
+    handlerRef.current = onEvent;
+  }, [onEvent]);
 
   useEffect(() => {
     if (!enabled) {
-      setStatus("off");
-      return;
+      const off = setTimeout(() => setStatus("off"), 0);
+      return () => clearTimeout(off);
     }
 
     let disposed = false;
     let socket: Socket | null = null;
-    setStatus("connecting");
 
     const run = async () => {
       const { io } = await import("socket.io-client");
       if (disposed) return;
+      setStatus("connecting");
 
       socket = io("/?XTransformPort=3003", {
         transports: ["websocket", "polling"],
