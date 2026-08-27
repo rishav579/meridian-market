@@ -1,61 +1,80 @@
-# Meridian Market — Multi-Vendor AI-Enhanced Marketplace
+﻿# Meridian Market — Multi-Vendor AI-Enhanced Marketplace
 
-**Next.js 16 (App Router) · TypeScript strict · Tailwind CSS 4 + shadcn/ui · Prisma (SQLite sandbox / Postgres-ready) · Zustand · TanStack Query · socket.io mini-service · z-ai-web-dev-sdk LLM · Simulated Stripe Connect with HMAC-verified webhooks**
+**Next.js 16 (App Router) · TypeScript Strict · Tailwind CSS 4 · Prisma (SQLite Sandbox / PostgreSQL-Ready) · Zustand · TanStack Query · Socket.IO Realtime Service · Catalog-Grounded AI Assistant · Simulated Stripe Connect with HMAC Webhooks**
 
-A full-stack, production-shaped marketplace: multiple vendors sell through one storefront, the platform takes a 10% commission on every line, and an AI shopping assistant answers natural-language questions against the live catalog. Every subsystem — auth, payments, realtime, caching, rate limiting — is built the way a real deployment would be, with the simulated parts faithfully mirroring their production contracts.
+Meridian Market is a production-shaped multi-vendor marketplace prototype built with Next.js, TypeScript, Prisma, SQLite, realtime Socket.IO infrastructure, a catalog-grounded AI assistant, and a simulated Stripe Connect payment boundary.
 
 ---
 
-## Features
+## Why I Built This
 
-- **RBAC authentication with 3 roles** — `ADMIN` / `VENDOR` / `CUSTOMER`; scrypt password hashing (16-byte per-user salt, 64-byte derived key, timing-safe comparison) and opaque 32-byte session tokens stored in the DB, delivered as an httpOnly `SameSite=Lax` cookie with a 7-day TTL. API surface is intentionally shaped like Auth.js for a drop-in migration.
-- **Vendor onboarding + admin approval workflow** — sign-up creates a store in `PENDING` status; products only become publicly visible once an admin approves the store (`PATCH /api/stores/:id`). Admins can also suspend stores and tune per-store commission (0–50%, default 10%).
-- **Product CRUD** — vendors manage only their own catalog (`NOT_OWNER` enforcement); admins manage any store via `?storeSlug=`. Public catalog search supports query, category, price range, featured filter, five sort modes and pagination, behind a 10-second response cache.
-- **AI shopping assistant (RAG-lite)** — natural-language product Q&A over the live catalog: budget/keyword extraction, scored retrieval (name/tags/category/description + rating and featured boosts) over ACTIVE stores, context-injected LLM call via `z-ai-web-dev-sdk`, full chat persistence, and a deterministic fallback reply when the LLM is unavailable (`degraded` flag surfaced to the UI).
-- **Persistent guest + user cart with merge-on-login** — guests get an httpOnly 30-day guest-token cart; on login the guest cart is merged into the user cart inside a transaction (quantities summed, capped to stock and 20 per line) and the guest row deleted. Prices are snapshotted server-side — never trusted from the client.
-- **Checkout with simulated Stripe Connect split payments** — one interactive Prisma transaction creates the `PENDING` order with fully snapshotted line items, decrements stock atomically with database-level availability guards, creates transactional `Payout` rows, and clears the cart. Supports client idempotency via `Idempotency-Key` headers and database uniqueness constraints. The order number format is `MK-<year>-<random-hex>`.
-- **Signed webhooks** — the checkout flow delivers a `payment_intent.succeeded` webhook **to this app's own endpoint**, signed `t=<ts>,v1=<HMAC-SHA256>` over `<ts>.<payload>`, verified with timing-safe comparison and a 5-minute replay window *before* the body is parsed. Only the webhook flips an order to `PAID` and payouts to `AVAILABLE` (a direct-settlement fallback exists if self-delivery fails).
-- **Realtime vendor order feeds via socket.io rooms** — a small dedicated service (engine.io owns `/` on :3003) pushes `order:new`, `order:status` and `payout:update` events to per-user, per-store and admin rooms. Room joins are authorized by a 60-second HMAC ticket minted by `GET /api/realtime/ticket`; the Next.js backend broadcasts through an internal control plane on :3004 guarded by a shared secret.
-- **Rate limiting** — per-IP, per-route, per-method windowed counters on every `withApi` route (real numbers in the [security section](#security)); `429` responses carry `Retry-After` and `X-RateLimit-*` headers.
-- **Layered CSRF protection** — mutating verbs are verified in order of reliability: (1) a double-submit token (JS-readable `mk_csrf` cookie must equal the `x-csrf-token` header, compared with `timingSafeEqual`) — this check survives proxies that rewrite `Host`, such as preview iframes and multi-hop gateways; (2) Fetch Metadata (`Sec-Fetch-Site: cross-site` is rejected); (3) a legacy `Origin`-vs-`Host` comparison only when neither signal exists. Layered on top of `SameSite=Lax` session cookies.
-- **In-memory TTL caching as a Redis swap point** — a ~40-line cache behind a narrow interface (`cacheGet` / `cacheSet` / `cacheInvalidatePrefix` / `cached`); swapping in Redis touches no call sites. Same pattern for the rate limiter.
+I built Meridian Market to explore the architectural and transactional challenges inherent to multi-vendor commerce platforms:
+
+1. **Transactional Commerce & Concurrency**: Multi-vendor checkouts involve coordinating inventory reservation across multiple independent stores, creating immutable order item snapshots, computing platform commissions, and recording vendor payouts. Handling these operations safely requires interactive transactions with conditional database-level stock decrements to eliminate time-of-check to time-of-use (TOCTOU) race conditions.
+2. **Network Retries & Idempotency**: Distributed clients frequently retry requests due to network timeouts. I implemented database-backed idempotency keys on the checkout surface to ensure that duplicate requests return the existing order without duplicate charges, re-decrementing inventory, or creating orphan payouts.
+3. **Financial State Machine & Security Boundaries**: Payment state (`PAID`) represents a verified financial event, not an administrative opinion. The order lifecycle state machine restricts the `PAID` transition exclusively to verified payment webhooks, blocking manual administrative overrides while allowing legitimate downstream order fulfillment.
+4. **Reliable Webhook Verification**: The payment boundary verifies timing-safe HMAC-SHA256 signatures on raw request payloads with a 5-minute replay window before parsing JSON, matching production payment gateway contracts.
+5. **Grounded AI Assistant with Deterministic Fallback**: The shopping assistant uses catalog extraction and attribute scoring over active store inventory. When external LLM credentials or services are unavailable, it degrades gracefully to deterministic catalog-grounded recommendations rather than failing silently.
+
+---
+
+## Key Engineering Decisions
+
+* **Integer Cents Money Integrity**: Floating-point math is never used for stored financial values. All amounts are stored as integer cents ($10.00 = 1000). The single rounding point in the entire codebase is half-up rounding on line-item commission calculation (`computeLineSplit`), guaranteeing that platform commission plus vendor earnings always equals the line total.
+* **Cryptographically Generated, Collision-Resistant Order Numbers**: Replaced sequential table count queries with `MK-<YYYY>-<8 HEX CHARS>` using standard library `node:crypto.randomBytes(4)`. This avoids lock contention and eliminates race conditions under high concurrent checkout volume while providing over $4.29 \times 10^9$ unique combinations per calendar year.
+* **Atomic Conditional Stock Allocation**: Inventory decrements execute inside the Prisma `$transaction` using conditional updates (`WHERE id = ? AND stock >= ?`). If any item's stock is insufficient at the exact moment of decrement, the count check aborts and rolls back the entire transaction, leaving inventory and cart state intact.
+* **Webhook-Controlled PAID State**: The state machine table (`TRANSITION_AUTHORS.PAID = []`) explicitly reserves the `PAID` transition for the webhook handler. No human user role—including platform administrators—can manually patch an order to `PAID`.
+* **Portable SQLite Sandbox to PostgreSQL Architecture**: Built locally on SQLite for zero-dependency development, but modeled with strict relational constraints, indexed foreign keys, and integer cents representations that map directly to PostgreSQL in production.
+
+---
+
+## Visual Preview
+
+<div align="center">
+  <img src="docs/screenshots/home-desktop.png" alt="Meridian Market Desktop Storefront" width="85%" />
+  <p><em>Curated multi-vendor storefront with catalog filtering and AI shopping assistant</em></p>
+</div>
+
+---
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Client["Browser — single-route SPA at /"]
+    subgraph Client["Browser — Single-Route SPA at /"]
         UI["React UI<br/>Zustand + TanStack Query"]
-        WS["socket.io client"]
+        WS["Socket.IO Client"]
     end
 
     subgraph Next["Next.js 16 App Router — :3000"]
-        API["API routes (withApi pipeline:<br/>rate limit → CSRF → session → RBAC)"]
+        API["API Routes (withApi pipeline:<br/>Rate Limit → CSRF → Session → RBAC)"]
         PRISMA["Prisma Client"]
     end
 
-    DB[("SQLite<br/>db/custom.db<br/>(Postgres-ready schema)")]
+    DB[("SQLite Database<br/>(PostgreSQL-Ready Schema)")]
 
-    LLM["z-ai-web-dev-sdk<br/>LLM chat completions"]
+    LLM["Catalog-Grounded AI Assistant<br/>LLM + Deterministic Fallback"]
 
-    subgraph RT["mini-services/realtime"]
-        CP["Control plane — :3004<br/>POST /emit + x-realtime-secret"]
-        IO["socket.io — :3003, path /<br/>rooms: user:* store:* admin"]
+    subgraph RT["Realtime Mini-Service"]
+        CP["Control Plane — :3004<br/>POST /emit + Shared Secret"]
+        IO["Socket.IO Server — :3003<br/>Rooms: user:* store:* admin"]
     end
 
-    STRIPE["Simulated Stripe Connect<br/>PaymentIntent + per-store transfers<br/>10% platform commission"]
+    STRIPE["Simulated Stripe Connect Boundary<br/>PaymentIntent + Per-Store Transfers<br/>10% Platform Commission"]
 
-    UI -->|fetch /api/*| API
+    UI -->|Fetch /api/*| API
     API --> PRISMA --> DB
-    API -->|RAG-lite catalog context| LLM
-    API -->|emitRealtime (fire-and-forget)| CP --> IO
-    IO -->|order:new / order:status / payout:update| WS --> UI
-    UI -->|GET /api/realtime/ticket<br/>60s HMAC ticket| API
-    API -->|capture + computeSplits| STRIPE
-    STRIPE --->|self-delivered webhook<br/>stripe-signature HMAC| API
+    API -->|Catalog Context| LLM
+    API -->|Emit Event| CP --> IO
+    IO -->|Live Updates| WS --> UI
+    UI -->|60s HMAC Ticket| API
+    API -->|Capture + Splits| STRIPE
+    STRIPE --->|Signed Webhook HMAC| API
 ```
 
-## Data model
+---
+
+## Data Model
 
 ```mermaid
 erDiagram
@@ -77,23 +96,23 @@ erDiagram
     User {
         string id PK
         string email UK
-        string passwordHash "scrypt:salt:digest"
+        string passwordHash
         string name
-        string role "ADMIN|VENDOR|CUSTOMER"
+        string role
     }
     Session {
         string id PK
-        string token UK "32-byte random hex"
+        string token UK
         string userId FK
-        datetime expiresAt "7-day TTL"
+        datetime expiresAt
     }
     Store {
         string id PK
         string name
         string slug UK
-        string status "PENDING|ACTIVE|SUSPENDED"
-        float commissionRate "default 0.1"
-        string vendorId FK "unique, 1:1 with vendor User"
+        string status
+        float commissionRate
+        string vendorId FK
     }
     Product {
         string id PK
@@ -101,7 +120,7 @@ erDiagram
         string slug UK
         int priceCents
         string category
-        string tags "comma-separated retrieval keywords"
+        string tags
         int stock
         float rating
         boolean featured
@@ -109,22 +128,23 @@ erDiagram
     }
     Cart {
         string id PK
-        string userId FK "nullable (user cart)"
-        string guestToken UK "nullable (guest cart)"
+        string userId FK
+        string guestToken UK
     }
     CartItem {
         string id PK
         string cartId FK
         string productId FK
-        int quantity "1..20"
-        int unitPrice "cents, server-snapshotted"
+        int quantity
+        int unitPrice
     }
     Order {
         string id PK
-        string orderNumber UK "MK-YYYY-NNNNNN"
-        string userId FK "nullable (guest checkout)"
+        string orderNumber UK
+        string idempotencyKey UK
+        string userId FK
         string guestEmail
-        string status "state machine"
+        string status
         int subtotal
         int commissionTotal
         int total
@@ -133,14 +153,14 @@ erDiagram
     OrderItem {
         string id PK
         string orderId FK
-        string productId FK "nullable (deleted products)"
+        string productId FK
         string storeId FK
-        string productName "snapshot"
-        string storeName "snapshot"
+        string productName
+        string storeName
         int unitPrice
         int quantity
         int lineTotal
-        float commissionRate "snapshot"
+        float commissionRate
         int commission
         int vendorEarnings
     }
@@ -154,203 +174,138 @@ erDiagram
     Payout {
         string id PK
         string storeId FK
-        string orderId FK "nullable"
-        int amount "vendor earnings, cents"
-        string status "PENDING|AVAILABLE|PAID|REVERSED"
-        string transferId "simulated Connect transfer"
+        string orderId FK
+        int amount
+        string status
+        string transferId
     }
     ChatSession {
         string id PK
-        string userId FK "nullable (guest chat)"
+        string userId FK
     }
     ChatMessage {
         string id PK
         string sessionId FK
-        string role "user|assistant"
+        string role
         string content
     }
 ```
 
-## Order lifecycle
+---
 
-Enforced by the `ORDER_TRANSITIONS` state machine in `src/lib/constants.ts` and the `PATCH /api/orders/:id` route. Every transition appends an `OrderEvent` and broadcasts a realtime `order:status` event. Cancellation restocks inventory and reverses `PENDING`/`AVAILABLE` payouts to `REVERSED`.
+## Order Lifecycle State Machine
+
+Enforced by `ORDER_TRANSITIONS` and `TRANSITION_AUTHORS` in `src/lib/constants.ts` and the `PATCH /api/orders/:id` endpoint. Every state transition writes an immutable `OrderEvent` audit log and broadcasts a realtime update.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PENDING : checkout (atomic txn, stock decremented, payouts created)
-    PENDING --> PAID : payment webhook only<br/>(TRANSITION_AUTHORS.PAID: empty, webhook-only)
-    PENDING --> CANCELLED : customer / vendor / admin
-    PAID --> PROCESSING : vendor / admin
-    PAID --> CANCELLED : customer / vendor / admin
-    PROCESSING --> SHIPPED : vendor / admin
-    PROCESSING --> CANCELLED : vendor / admin
-    SHIPPED --> DELIVERED : vendor / admin
+    [*] --> PENDING : Checkout (atomic txn, stock decremented, payouts created)
+    PENDING --> PAID : Payment webhook only (no human override)
+    PENDING --> CANCELLED : Customer / Vendor / Admin
+    PAID --> PROCESSING : Vendor / Admin
+    PAID --> CANCELLED : Customer / Vendor / Admin
+    PROCESSING --> SHIPPED : Vendor / Admin
+    PROCESSING --> CANCELLED : Vendor / Admin
+    SHIPPED --> DELIVERED : Vendor / Admin
     DELIVERED --> [*]
-    CANCELLED --> [*] : restock + reverse payouts
+    CANCELLED --> [*] : Restock inventory + reverse payouts
 ```
 
-`PAID` is settable **only** through the payment webhook path (`TRANSITION_AUTHORS.PAID = []`, interpreted as the payment system webhook only); no human-facing route (including admin) may mark an order paid.
+---
 
-## Local setup
+## Security & Protection Layers
 
-Prerequisites: [Bun](https://bun.sh) 1.2+.
+* **Password Security**: Derived using `scryptSync` (16-byte random salt, 64-byte key) formatted as `scrypt:<salt>:<digest>`, compared with `timingSafeEqual` to avoid timing attacks.
+* **Session Management**: Opaque 32-byte random hex tokens stored in the `Session` database table and delivered via httpOnly, `SameSite=Lax` cookies with a 7-day TTL.
+* **Layered CSRF & Origin Verification**: Mutating HTTP requests verify a double-submit CSRF cookie (`mk_csrf`) against the `x-csrf-token` header using timing-safe comparison, paired with Fetch Metadata (`Sec-Fetch-Site: cross-site` rejection).
+* **Sliding-Window Rate Limiting**: Per-IP, per-route sliding window counters configured across the API surface (e.g., login: 10/min, checkout: 8/min, AI chat: 15/min, catalog reads: 120/min).
+* **Webhook Replay Protection**: `stripe-signature` parsed as `t=<timestamp>,v1=<signature>`. The HMAC-SHA256 is verified over `<timestamp>.<raw body>` with `timingSafeEqual`, enforcing a strict 5-minute timestamp tolerance window.
+
+---
+
+## Testing & Verification
+
+Automated testing is powered by **Vitest** against an isolated throwaway SQLite database created fresh per test run via Prisma (`tests/global-setup.ts`). Tests run against real Next.js route handlers through the full `withApi` middleware pipeline without external network dependencies.
+
+```text
+75 / 75 tests passing across 7 test suites:
+
+Unit Suites (28 tests):
+  ✓ tests/unit/money.test.ts          (8 tests)   - Half-up rounding, cent conservation, split calculations
+  ✓ tests/unit/order-machine.test.ts  (9 tests)   - Legal state transitions, terminal states, PAID webhook monopoly
+  ✓ tests/unit/payments.test.ts       (11 tests)  - HMAC signature verification, replay window, payload tampering
+
+Integration Suites (47 tests):
+  ✓ tests/integration/checkout.test.ts      (12 tests)  - Atomic reservation, stock rollback, idempotency, random order numbers
+  ✓ tests/integration/auth-rbac.test.ts     (15 tests)  - Role authorization, IDOR boundaries, vendor isolation, admin PAID block
+  ✓ tests/integration/webhook.test.ts       (11 tests)  - Signed webhook settlement, idempotent replay, unsigned payload rejection
+  ✓ tests/integration/ai-assistant.test.ts  (9 tests)   - Budget parsing, active store retrieval, deterministic offline fallback
+```
+
+---
+
+## Local Setup
+
+### Prerequisites
+* [Bun](https://bun.sh) 1.2+ (or Node.js 20+)
+
+### Quickstart
 
 ```bash
 # 1. Install dependencies
 bun install
 
-# 2. Configure environment (defaults already work for local dev)
+# 2. Configure environment variables
 cp .env.example .env
 
-# 3. Create the SQLite database and generate the Prisma client
+# 3. Initialize the SQLite database and generate Prisma Client
 bun run db:push
 
-# 4. Seed demo users, stores (12 products, 1 pending store) — idempotent
+# 4. Seed demo accounts, stores, and catalog products
 bun prisma/seed.ts
 
-# 5. Start the marketplace on http://localhost:3000
+# 5. Start Next.js development server (http://localhost:3000)
 bun run dev
 
-# 6. In a second terminal, start the realtime mini-service (socket.io :3003, control plane :3004)
+# 6. (Optional) In a separate terminal, start the realtime mini-service
 cd mini-services/realtime && bun run dev
 ```
 
-The realtime service is optional at runtime — the API marks it fire-and-forget and the UI degrades gracefully — but the vendor order feed and admin live stats require it.
-
-## Demo accounts
-
-Seeded by `prisma/seed.ts` (development credentials only).
-
-| Email | Password | Role | Store | Notes |
-| --- | --- | --- | --- | --- |
-| `admin@meridian.dev` | `Admin123!` | ADMIN | — | Platform console: GMV, commission, store approval, payout ledger |
-| `velocity@meridian.dev` | `Vendor123!` | VENDOR | Velocity Athletics (ACTIVE) | 4 products |
-| `nordic@meridian.dev` | `Vendor123!` | VENDOR | Nordic Audio Lab (ACTIVE) | 3 products |
-| `terra@meridian.dev` | `Vendor123!` | VENDOR | Terra Home Goods (ACTIVE) | 3 products |
-| `pixelforge@meridian.dev` | `Vendor123!` | VENDOR | Pixel Forge Studio (**PENDING**) | Intentionally pending to demo admin approval |
-| `casey@meridian.dev` | `Customer123!` | CUSTOMER | — | Shopper |
-
-Sign in as `admin@meridian.dev` and open the admin console to approve Pixel Forge Studio, then watch its two products appear in the public catalog (the product cache invalidates on store moderation).
-
-## API surface
-
-All routes run through the `withApi` middleware pipeline (rate limit → same-origin check on mutations → session → RBAC) except the webhook and health endpoints. Rate limits below are requests **per minute, per IP, per route**.
-
-| Method | Path | Auth | Rate limit | Purpose |
-| --- | --- | --- | --- | --- |
-| GET | `/api/health` | none | — | Liveness probe (`SELECT 1`; 503 when DB down) |
-| POST | `/api/auth/signup` | public | 10/min | Create CUSTOMER or VENDOR; vendor stores start PENDING |
-| POST | `/api/auth/login` | public | 10/min | Sign in; merges guest cart into user cart |
-| GET | `/api/auth/me` | public | 120/min | Current user + cart count; issues CSRF cookie |
-| POST | `/api/auth/logout` | public | 20/min | Destroy session (DB + cookie) |
-| GET | `/api/products` | public | 120/min | Search / filter / sort / paginate ACTIVE-store catalog (10s cache) |
-| POST | `/api/products` | VENDOR, ADMIN | 30/min | Create product (admins pass `?storeSlug=`) |
-| GET | `/api/products/:id` | public | 120/min | Product detail (404 for non-ACTIVE stores) |
-| PATCH | `/api/products/:id` | VENDOR (owner), ADMIN | 60/min | Partial update |
-| DELETE | `/api/products/:id` | VENDOR (owner), ADMIN | 30/min | Delete; removes from carts, keeps order snapshots |
-| GET | `/api/cart` | public (guest cookie or session) | 120/min | Cart with server-side prices, subtotal, count |
-| POST | `/api/cart` | public | 90/min | Add / increment item (stock- and 20-cap enforced) |
-| PATCH | `/api/cart` | public | 90/min | Set quantity (`0` removes) |
-| DELETE | `/api/cart` | public | 60/min | Remove one (`?productId=`) or clear the cart |
-| POST | `/api/checkout` | public (guests supply email) | 8/min | Atomic order + splits + self-delivered signed webhook |
-| GET | `/api/orders` | signed-in | 60/min | CUSTOMER: own · VENDOR: participant · ADMIN: all (last 50) |
-| GET | `/api/orders/:id` | owner / vendor participant / admin | 60/min | Order detail + event timeline (vendor items scoped) |
-| PATCH | `/api/orders/:id` | signed-in + authorship rules | 60/min | State-machine transitions (see above) |
-| GET | `/api/stores` | public | 60/min | ACTIVE store directory (`?all=1` for admins) |
-| POST | `/api/stores` | VENDOR (without a store) | 10/min | Create store (PENDING) |
-| PATCH | `/api/stores/:id` | ADMIN | 30/min | Approve / suspend / set commission rate |
-| GET | `/api/admin/stats` | ADMIN | 60/min | GMV, commission, order pipeline, store leaderboard, payouts (5s cache) |
-| GET | `/api/realtime/ticket` | signed-in | 30/min | 60s HMAC ticket authorizing socket.io room joins |
-| POST | `/api/webhooks/stripe` | HMAC signature (no cookie auth) | — | Verify signature on raw body → settle `payment_intent.succeeded` / `transfer.created`, idempotently |
-
-`GET /api` is the scaffold ping and can be removed.
-
-## Security
-
-- **Password storage** — scrypt (`scryptSync`, 16-byte random hex salt, 64-byte derived key) stored as `scrypt:<salt>:<digest>`; verification is length-checked and `timingSafeEqual`. Login failures return a uniform `Invalid email or password.` — no user-enumeration oracle.
-- **Sessions** — 32-byte random opaque tokens in the `Session` table (never JWTs, nothing decodable client-side), sent as `mk_session` httpOnly / `SameSite=Lax` / `Secure`-in-production cookies, 7-day TTL with opportunistic cleanup of expired rows. The session table doubles as a revoke-everywhere primitive.
-- **RBAC** — every `withApi` route declares required roles (`roles: []` = any authenticated user); `withApi` rejects unauthenticated callers with 401 and wrong-role callers with 403 before the handler runs. Object-level checks (own product, participant order, own store) are enforced inside handlers.
-- **Rate limiting** — windowed per-IP counters keyed `ip:path:method` with opportunistic sweeping. Actual configured limits (per minute): login 10, signup 10, checkout **8**, AI chat **15**, product writes 30–60, cart writes 60–90, reads 60–120. Exceeding returns `429` with `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Reset`.
-- **CSRF / same-origin** — every non-`GET/HEAD/OPTIONS` request must carry an `Origin` whose host equals the request `Host` (403 `CSRF_REJECTED` otherwise), on top of `SameSite=Lax` cookies; `GET /api/auth/me` additionally seeds a JS-readable `mk_csrf` double-submit cookie (24h).
-- **Webhook verification** — `stripe-signature` parsed as `t=<ts>,v1=<mac>`; the HMAC-SHA256 is computed over `<ts>.<raw body>` and compared with `timingSafeEqual`; timestamps outside the **5-minute replay window** are rejected before JSON parsing. Event handling is idempotent (replaying a settled intent is a no-op).
-- **Realtime ticket auth** — browsers cannot self-declare rooms. The SPA fetches a 60-second HMAC-SHA256 ticket (`{sub, role, storeId, exp}`, signed with `AUTH_SECRET`); the socket service verifies it and derives the allowed room set (`user:<id>`, plus `store:<id>` for vendors or `admin` for admins). The emit control plane on :3004 is bound to `127.0.0.1` and requires the shared `REALTIME_SECRET` header, with a 1 MB body guard.
-- **Input sanitization** — every mutating route parses through Zod (`src/lib/validation.ts`): strings trimmed and length-capped, closed literal-union enums, integer cents bounds (`$0.50–$100,000`), quantity caps; parsed output is the only thing that reaches Prisma. Zod failures become structured `422 VALIDATION_ERROR` envelopes.
-- **Money integrity** — integer cents end-to-end; floating point never touches stored money; the single rounding point is `computeLineSplit` (round-half-up on the per-line commission).
-- **Security headers** — cookie-level protections (`httpOnly`, `SameSite`, `Secure` in production) are set by the app; transport and framing headers (`HSTS`, `X-Content-Type-Options`, `X-Frame-Options`/`frame-ancestors`, a CSP suited to the single-route SPA) are enforced at the edge — set them on the hosting proxy/CDN (or a Next.js `middleware.ts`/`next.config.ts` `headers()` block) where TLS terminates. (Note: `X-Frame-Options`/`frame-ancestors` is intentionally absent in this sandbox build so the platform preview can iframe the app — add it for any public deployment.)
-
-## Testing strategy
-
-**Vitest** provides the automated foundation (`npm test`, 68 tests, no external services): unit suites over the pure modules, plus integration suites that drive the **real route handlers through the `withApi` pipeline against a throwaway SQLite database** provisioned from the actual Prisma schema (`tests/global-setup.ts`). The LLM SDK is mocked offline so the deterministic fallback path is exercised deterministically.
-
-```text
-tests/
-  global-setup.ts          # prisma db push → fresh temp SQLite per run
-  setup.ts                 # next/headers cookie-jar mock for route handlers
-  helpers/test-utils.ts    # NextRequest builder, session/DB fixtures, resetDb
-  unit/
-    money.test.ts          # half-up commission rounding, cent conservation
-    order-machine.test.ts  # ORDER_TRANSITIONS / TRANSITION_AUTHORS table
-    payments.test.ts       # signature verify, tamper/replay/forgery rejection, splits
-  integration/
-    checkout.test.ts       # one atomic order, live-price snapshotting, stock guard, cart clear
-    auth-rbac.test.ts      # 401 gate, role matrix, IDOR, vendor tenant scoping
-    webhook.test.ts        # signed settle, idempotent replay, unsigned-forgery rejection
-    ai-assistant.test.ts   # budget extraction, ACTIVE-store retrieval, degraded fallback, chat persistence
-```
-
-- **Unit (vitest)** — `money.test.ts`: "rounds commission half-up per line", "never loses a cent: commission + vendorEarnings === lineTotal". `payments.test.ts`: "accepts a correctly signed payload", "rejects a tampered body", "rejects a signature older than 5 minutes (replay window)", "rejects signatures minted with the wrong secret". `order-machine.test.ts`: "permits only ORDER_TRANSITIONS[from] targets", "PAID has no CUSTOMER/VENDOR authors", "DELIVERED/CANCELLED are terminal".
-- **Integration (vitest + real route handlers + throwaway SQLite)** — `checkout.test.ts`: "creates exactly one order atomically and clears the cart", "prices the order from the live catalog at checkout time (server-side authority)", "rejects checkout when stock became insufficient (409) and creates nothing", "supports guest checkout", "marks payouts AVAILABLE after settlement". `auth-rbac.test.ts`: "unauthenticated protected API → 401", "customer → admin stats 403", "customer cannot read/transition another customer's order", "vendor NOT_OWNER on foreign products", "vendor order lists/details/payouts scoped to its own store". `webhook.test.ts`: "valid signature flips order to PAID + payouts AVAILABLE", "replaying the settled event is a no-op", "unsigned frontend-style JSON cannot settle payments", "expired timestamps rejected". `ai-assistant.test.ts`: "'under $X'/'over $X' budget filters", "only ACTIVE-store in-stock products retrieved", "deterministic rating-ranked fallback when nothing matches", "degraded=true with grounded recommendations when the LLM is unavailable", "chat history persisted across turns".
-- **Not yet covered (planned):** `rate-limit` unit tests, cart-merge integration tests, and the Playwright E2E layer (`guest-checkout.spec.ts`, `vendor-realtime.spec.ts`) remain the recommended additions for a production fork.
-
-## Deployment
-
-### Vercel (app) + managed Postgres + hosted realtime
-
-1. Push to GitHub; import the repo in Vercel (framework auto-detected; `output: "standalone"` is already configured in `next.config.ts`).
-2. Provision Postgres (Neon/Supabase/RDS), set `provider = "postgresql"` in `prisma/schema.prisma` and convert the `String` unions to `enum` blocks — the only schema change required.
-3. Set environment variables (see `.env.example`):
-
-   | Variable | Purpose |
-   | --- | --- |
-   | `DATABASE_URL` | Postgres connection string (SQLite `file:` path in sandbox) |
-   | `AUTH_SECRET` | Signs realtime tickets; shared with the realtime service |
-   | `REALTIME_SECRET` | Shared secret on the emit control plane (`x-realtime-secret`) |
-   | `STRIPE_WEBHOOK_SECRET` | HMAC key for webhook signature verification |
-   | `REALTIME_INTERNAL_URL` | Control-plane base the API POSTs emits to (default `http://127.0.0.1:3004`) |
-   | `INTERNAL_API_BASE` | Where checkout self-delivers the signed webhook (default `http://127.0.0.1:3000`) |
-   | `NEXT_PUBLIC_APP_NAME` | Display name exposed to the client |
-
-4. Run `prisma migrate deploy` + seed during release, then deploy the realtime mini-service to any long-lived host (Fly.io / Railway / ECS; it is a plain Bun process) and point `REALTIME_INTERNAL_URL` at it.
-
-### Docker / docker-compose (single host)
+### Running Tests & Quality Checks
 
 ```bash
-cp .env.example .env          # fill real secrets
-docker compose up --build     # migrate → app (:3000) + realtime (:3003/:3004)
+# Run the complete test suite (75 tests)
+npm test
+
+# Run ESLint check
+npm run lint
+
+# Run TypeScript typecheck
+npx tsc --noEmit
+
+# Run Next.js production build
+npm run build
 ```
 
-`docker-compose.yml` runs a one-shot `migrate` service (`prisma db push` + seed), then the multi-stage-built app (non-root, standalone Next.js server) and the realtime service, with a named volume for the SQLite file and a `/api/health` healthcheck.
+---
 
-### Swapping in real Stripe Connect
+## Demo Accounts
 
-The simulated engine intentionally reproduces the production contract, so the swap is small and contained in `src/lib/payments.ts`:
+The database seed (`prisma/seed.ts`) provisions the following development accounts:
 
-1. Replace the internals of `createPaymentIntent` / `captureWithSplits` with real `stripe` SDK calls — PaymentIntents with `application_fee_amount` and `transfer_data.destination` (destination charges) or separate charges and transfers, whichever matches the onboarding state of your connected accounts. Keep the exported signatures.
-2. **Keep `verifyWebhookSignature` exactly as is** — it mirrors Stripe's `constructEvent` (same header format, same timestamp tolerance); only the secret changes.
-3. In the Stripe dashboard create a *restricted* webhook endpoint for `payment_intent.succeeded` and `transfer.created` pointing at `/api/webhooks/stripe`, copy its signing secret into `STRIPE_WEBHOOK_SECRET`, and delete the self-delivery block in `POST /api/checkout` (real webhooks arrive from Stripe instead).
-4. Onboard vendors with Connect Express accounts; map `Payout.transferId` to real transfer IDs and drive `PENDING → AVAILABLE → PAID` from `transfer.created` events.
-5. Re-run the webhook unit tests — they assert the verifier contract, not the simulator, and must pass unchanged against the real secret format (`whsec_...`).
+| Email | Password | Role | Store | Purpose |
+|---|---|---|---|---|
+| `admin@meridian.dev` | `Admin123!` | `ADMIN` | — | Platform moderation, store approval, payout ledger |
+| `velocity@meridian.dev` | `Vendor123!` | `VENDOR` | Velocity Athletics (ACTIVE) | Footwear & athletics vendor (4 products) |
+| `nordic@meridian.dev` | `Vendor123!` | `VENDOR` | Nordic Audio Lab (ACTIVE) | Premium audio equipment (3 products) |
+| `terra@meridian.dev` | `Vendor123!` | `VENDOR` | Terra Home Goods (ACTIVE) | Home & kitchen goods (3 products) |
+| `pixelforge@meridian.dev` | `Vendor123!` | `VENDOR` | Pixel Forge Studio (**PENDING**) | Demonstrates store approval workflow |
+| `casey@meridian.dev` | `Customer123!` | `CUSTOMER` | — | Standard shopper account |
 
-## Repository layout
+---
 
-```text
-prisma/schema.prisma        12-model schema, integer-cents money, indexed FKs
-prisma/seed.ts              idempotent demo dataset (6 users, 4 stores, 12 products)
-src/lib/                    api pipeline, auth, payments, ai, cart, money, cache,
-                            rate-limit, realtime, validation, constants
-src/app/api/                route handlers (see API surface above)
-mini-services/realtime/     socket.io service (:3003) + control plane (:3004)
-public/products/            generated product imagery
-Dockerfile / docker-compose.yml / .github/workflows/ci.yml
-DECISIONS.md                ADR-style record of the 12 core design decisions
-```
+## Known Limitations & Production Path
+
+* **Database Engine**: Uses local SQLite for instant setup. The Prisma schema is structured for PostgreSQL migration by updating the `provider` in `prisma/schema.prisma` and configuring a PostgreSQL connection string.
+* **Cache & Rate Limiting Storage**: Uses in-memory sliding window counters and TTL stores, architected behind narrow interfaces (`src/lib/cache.ts`, `src/lib/rate-limit.ts`) as direct swap points for Redis in multi-instance deployments (see `DECISIONS.md` ADR #8).
+* **Payment Gateway**: Features a fully modeled Stripe Connect destination-charge simulation with real HMAC webhook verification. Swapping to production Stripe involves replacing `src/lib/payments.ts` methods with the official Stripe SDK while keeping the webhook verification signature contract intact (see `DECISIONS.md` ADR #4).
